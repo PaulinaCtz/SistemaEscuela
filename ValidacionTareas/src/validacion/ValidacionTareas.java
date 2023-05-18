@@ -1,0 +1,206 @@
+/*
+ * Click nbfs://nbhost/SystemFileSystem/Templates/Licenses/license-default.txt to change this license
+ * Click nbfs://nbhost/SystemFileSystem/Templates/Classes/Class.java to edit this template
+ */
+package validacion;
+
+import com.rabbitmq.client.AMQP;
+import java.util.ArrayList;
+import java.util.List;
+import com.rabbitmq.client.ConnectionFactory;
+import com.rabbitmq.client.Connection;
+import com.rabbitmq.client.Channel;
+import com.rabbitmq.client.Consumer;
+import com.rabbitmq.client.DefaultConsumer;
+import com.rabbitmq.client.Envelope;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.InvalidKeyException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.TimeoutException;
+import javax.crypto.BadPaddingException;
+import javax.crypto.Cipher;
+import javax.crypto.IllegalBlockSizeException;
+import javax.crypto.NoSuchPaddingException;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.SecretKeySpec;
+import javax.ws.rs.client.Client;
+import javax.ws.rs.client.ClientBuilder;
+import javax.ws.rs.core.MediaType;
+import javax.ws.rs.core.Response;
+import org.json.JSONObject;
+
+/**
+ *
+ * @author Paulina Cortez Alamilla.
+ */
+public class ValidacionTareas {
+
+    private List<String> tareasPendientes = new ArrayList<>();
+    private Map<String, String> tareasValidadas = new HashMap<>();
+
+    public ValidacionTareas() {
+    }
+
+    public void setTareasPendientes(List<String> tareasPendientes) {
+        this.tareasPendientes = tareasPendientes;
+    }
+
+    public List<String> getTareasPendientes() {
+        return tareasPendientes;
+    }
+
+    public Map<String, String> getTareasValidadas() {
+        return tareasValidadas;
+    }
+
+    public void setTareasValidadas(Map<String, String> tareasValidadas) {
+        this.tareasValidadas = tareasValidadas;
+    }
+
+    public void agregarTareaPendiente(String tarea, String destinatario) throws IOException, TimeoutException, NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, IllegalBlockSizeException, BadPaddingException {
+        // Generar una clave secreta basada en una contraseña
+        String password = "12345";
+        MessageDigest md = MessageDigest.getInstance("SHA-256");
+        byte[] key = md.digest(password.getBytes("UTF-8"));
+        key = Arrays.copyOf(key, 16);
+        SecretKey secretKey = new SecretKeySpec(key, "AES");
+        // Crear un cifrador AES en modo de cifrado
+        Cipher cipher = Cipher.getInstance("AES");
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey);
+        // Convertir la tarea a bytes
+        byte[] tareaBytes = tarea.getBytes("UTF-8");
+        // Encriptar los bytes de la tarea
+        byte[] tareaEncriptada = cipher.doFinal(tareaBytes);
+        // Crear una conexión y un canal a RabbitMQ
+        ConnectionFactory factory = new ConnectionFactory();
+        factory.setHost("localhost");
+        Connection connection = factory.newConnection();
+        Channel channel = connection.createChannel();
+        // Crear los headers
+        Map<String, Object> headers = new HashMap<>();
+        headers.put("destinatario", destinatario);
+        // Crear la cola si no existe
+        String cola = "envio_modulo_notificaciones";
+        boolean durable = true;
+        boolean exclusive = false;
+        boolean autoDelete = false;
+        channel.queueDeclare(cola, durable, exclusive, autoDelete, null);
+        // Publicar el mensaje en la cola
+        channel.basicPublish("", cola, new AMQP.BasicProperties.Builder().headers(headers).build(), tareaEncriptada);
+        System.out.println("Mensaje encriptado y publicado en la cola: " + Base64.getEncoder().encodeToString(tareaEncriptada));
+        // Cerrar la conexión y el canal
+        channel.close();
+        connection.close();
+    }
+
+    public void tareaValidada(String tarea) {
+        if (tareasPendientes.contains(tarea)) {
+            tareasPendientes.remove(tarea);
+            System.out.println("La tarea '" + tarea + "' ha sido eliminada correctamente.");
+        }
+    }
+
+    public void validarTarea(String tarea) {
+        tareasPendientes.add("Reporte Investigacion");
+        if (tareasPendientes.contains(tarea)) {
+            tareasValidadas.put(tarea, "Maria");
+            tareaValidada(tarea);
+        } else {
+            System.out.println("La tarea '" + tarea + "' no está pendiente para validación.");
+        }
+    }
+
+    // Este método se llama cuando se recibe una tarea a través de la aplicación
+    public void recibirTareaDesdeAPI() throws IOException, TimeoutException, NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, IllegalBlockSizeException, BadPaddingException {
+        // Construir el cliente de Jersey
+        Client client = ClientBuilder.newClient();
+
+        // Hacer una solicitud HTTP GET a la API
+        Response response = client.target("http://localhost:8080/AccesoDatosMoodle/webresources/MoodleTareas")
+                .request(MediaType.APPLICATION_JSON)
+                .get();
+
+        // Extraer el cuerpo de la respuesta como una cadena JSON
+        String responseBody = response.readEntity(String.class);
+
+        // Extraer el mensaje del JSON
+        JSONObject json = new JSONObject(responseBody);
+        String tarea = json.getString("titulo");
+
+        tareasPendientes.add(tarea);
+        // Llamar al método recibirTarea con el mensaje extraído del JSON
+        agregarTareaPendiente(tarea, "Maria");
+
+        System.out.println();
+
+        // Cerrar el cliente de Jersey
+        client.close();
+    }
+
+    public void consumirYValidarMensaje() {
+        ConnectionFactory factory = new ConnectionFactory();
+        factory.setHost("localhost");
+
+        try (Connection connection = factory.newConnection(); Channel channel = connection.createChannel()) {
+            String colaRegresoValidacion = "cola_regreso_validacion";
+
+            // Declarar la cola de regreso de validación
+            channel.queueDeclare(colaRegresoValidacion, false, false, false, null);
+
+            // Crear consumer y procesar mensajes
+            Consumer consumer = new DefaultConsumer(channel) {
+                @Override
+                public void handleDelivery(String consumerTag, Envelope envelope,
+                        AMQP.BasicProperties properties, byte[] body) throws IOException {
+                    // Descifrar el mensaje
+                    String mensajeDescifrado = decrypt(body);
+
+                    System.out.println("Mensaje recibido desde 'cola_regreso_validacion': " + mensajeDescifrado);
+
+                    // Llamar al método validarTarea con el mensaje descifrado
+                    validarTarea(mensajeDescifrado);
+                }
+            };
+
+            // Comenzar a consumir mensajes de la cola de regreso de validación
+            while (true) {
+                channel.basicConsume(colaRegresoValidacion, true, consumer);
+            }
+        } catch (Exception e) {
+            System.out.print("Error al consumir y validar mensajes");
+            e.printStackTrace();
+        }
+    }
+
+    private String decrypt(byte[] encryptedMessage) throws IOException {
+        try {
+            // Generar una clave secreta basada en una contraseña
+            String password = "12345";
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] key = md.digest(password.getBytes("UTF-8"));
+            key = Arrays.copyOf(key, 16);
+            SecretKey secretKey = new SecretKeySpec(key, "AES");
+
+            // Crear un cifrador AES en modo de descifrado
+            Cipher cipher = Cipher.getInstance("AES");
+            cipher.init(Cipher.DECRYPT_MODE, secretKey);
+
+            // Descifrar los bytes del mensaje
+            byte[] decryptedBytes = cipher.doFinal(encryptedMessage);
+
+            // Convertir los bytes descifrados a texto plano
+            return new String(decryptedBytes, StandardCharsets.UTF_8);
+        } catch (GeneralSecurityException e) {
+            e.printStackTrace();
+            throw new IOException("Error al descifrar el mensaje", e);
+        }
+    }
+
+}
